@@ -351,6 +351,12 @@ class Mouth:
         self._out: sd.OutputStream | None = None
         self._out_rate: int | None = None
         self.ducker = Ducker()  # public: PTT ducks for the USER's voice too
+        # True while the current turn came from the phone dashboard:
+        # main.py's handle() sets this per-turn (see its `source` arg)
+        # so a phone conversation never makes noise at the PC. Muting
+        # only skips the AUDIO queue below -- the transcript write
+        # always happens, so the phone still reads every word as text.
+        self.muted = False
         self._worker = threading.Thread(target=self._run, daemon=True)
         self._worker.start()
 
@@ -359,22 +365,28 @@ class Mouth:
         return self._speaking.is_set()
 
     def say(self, text: str):
-        """Queue text (split to sentences) for speech."""
+        """Queue text (split to sentences) for speech, unless muted."""
         for s in split_sentences(text):
-            self._q.put((s, None))
+            if not self.muted:
+                self._q.put((s, None))
             signals.append_transcript(CFG["name"], s)
 
     def say_chunk(self, text: str, directions=None):
         """Queue text as ONE TTS request, no sentence splitting — fuller
         chunks get livelier prosody (single short sentences come out
-        dull).
+        dull). Unless muted: the audio is skipped, but the transcript
+        and the directions are not -- a muted turn still writes what it
+        "said".
 
         `directions` are the stage directions this chunk carried. They are
         published on the signal bus when this chunk's audio STARTS, which
-        is why they travel with it instead of firing at parse time."""
+        is why they travel with it instead of firing at parse time. A
+        muted chunk never plays, so they never fire for one — nothing to
+        time the cue against."""
         text = text.strip()
         if text:
-            self._q.put((text, directions or None))
+            if not self.muted:
+                self._q.put((text, directions or None))
             signals.append_transcript(CFG["name"], text)
 
     def shut_up(self):

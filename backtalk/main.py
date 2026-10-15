@@ -631,6 +631,16 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
             # will ever dequeue, so nothing resets the bus — park it here.
             signals.static_stop()
             signals.set_state("idle")
+        elif mouth.muted:
+            # A muted (phone) turn never queues audio, so mouth.py's
+            # playback-completion path — the thing that normally flips
+            # the bus back to idle and fires reply_done() once its
+            # queue drains — never runs. Without this, the bus would
+            # read "thinking" forever after a muted turn even though
+            # the reply fully landed in the transcript.
+            signals.static_stop()
+            signals.reply_done()
+            signals.set_state("idle")
     except asyncio.CancelledError:
         try:
             await brain.interrupt()
@@ -722,6 +732,10 @@ async def amain():
     speak_task: asyncio.Task | None = None
     typed_q: "queue.Queue[str]" = queue.Queue()
     threading.Thread(target=_typed_reader, args=(typed_q,), daemon=True).start()
+    phone_q: "queue.Queue[str]" = queue.Queue()  # the dashboard's own
+    # queue, separate from typed_q, so a phone turn is tellable from a
+    # PC-typed one and handle() can mute the speaker for it (see
+    # handle()'s `source` parameter).
     typed_fut: asyncio.Future | None = None
 
     async def run_console(verb):
@@ -857,11 +871,22 @@ async def amain():
                 mouth.say(say_after)
         signals.set_state("idle")
 
-    async def handle(text: str, spoke_from: float | None = None) -> bool:
+    async def handle(text: str, spoke_from: float | None = None,
+                     source: str = "voice") -> bool:
         """Process one utterance; returns False on quit. spoke_from is
         when the utterance STARTED (the PTT press), so an answer can be
-        told apart from speech that began before the ask even existed."""
+        told apart from speech that began before the ask even existed.
+
+        source picks whether THIS turn's speech plays out loud: "phone"
+        mutes the speaker (the transcript still gets every word — see
+        Mouth.say/say_chunk — so the phone keeps reading the reply as
+        text) while everything PC-side (mic, PTT, or typed at this
+        console) stays audible. Set once here, at the one chokepoint
+        every utterance passes through regardless of source, so it
+        covers the whole turn: the streamed reply, any permission ask
+        the SDK routes through this turn, and console-verb replies."""
         nonlocal speak_task
+        mouth.muted = (source == "phone")
         log(f"[you]    {text}")
         signals.append_transcript("you", text)
         # A pending spoken permission ask owns the next utterance IF
@@ -949,9 +974,10 @@ async def amain():
         ptt = PTTListener(CFG["ptt_key"])
         dash_port = int(CFG.get("dashboard_port") or 0)
         if dash_port:
-            dashboard.start(dash_port, typed_q)
+            dashboard.start(dash_port, phone_q)
         press_fut: asyncio.Future | None = None
         mic_fut: asyncio.Future | None = None
+        phone_fut: asyncio.Future | None = None
         mic_gen_seen = _MIC["gen"]
         # The open mic yields while the BUTTON records (or the double
         # capture would turn one held utterance into two turns), and,
@@ -970,9 +996,11 @@ async def amain():
                     mic_fut.result(); mic_fut = None
             if typed_fut is None:
                 typed_fut = loop.run_in_executor(None, typed_q.get)
+            if phone_fut is None:
+                phone_fut = loop.run_in_executor(None, phone_q.get)
             if press_fut is None:
                 press_fut = loop.run_in_executor(None, ptt.wait_press)
-            waiters = {press_fut, typed_fut}
+            waiters = {press_fut, typed_fut, phone_fut}
             if _MIC["mode"] == "open":
                 if mic_fut is None:
                     g = _MIC["gen"]
@@ -988,6 +1016,11 @@ async def amain():
                 if text and not await handle(text):
                     return
                 continue
+            if phone_fut in done:
+                text = phone_fut.result(); phone_fut = None
+                if text and not await handle(text, source="phone"):
+                    return
+                continue
             if mic_fut is not None and mic_fut in done:
                 try:
                     g, text = mic_fut.result()
@@ -1000,6 +1033,10 @@ async def amain():
                         _MIC["mode"] = "ptt"
                         _MIC["gen"] += 1
                         mic_fails = 0
+                        # The PC's own mic just failed, so someone's
+                        # physically here regardless of whichever source
+                        # last set this -- always audible.
+                        mouth.muted = False
                         mouth.say("The open microphone keeps failing, "
                                   "so I'm switching to push to talk. "
                                   "Hold the key to reach me, and "
@@ -1013,6 +1050,11 @@ async def amain():
                 continue
             if press_fut in done:
                 press_fut.result(); press_fut = None
+                # The physical key was just pressed, so someone's at the
+                # PC right now -- audible regardless of the last turn's
+                # source. handle() below sets this too, but the two
+                # error paths in the try/except never reach handle().
+                mouth.muted = False
                 press_t = time.monotonic()
                 perm_wait = (_PERM["fut"] is not None
                              and not _PERM["fut"].done())
