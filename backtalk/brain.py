@@ -103,6 +103,8 @@ class WarmBrain:
                 add_dirs=CFG["extra_dirs"],
                 skills=CFG["visible_skills"],
                 resume=rid,
+                max_buffer_size=10 * 1024 * 1024,  # 10MB; default 1MB was
+                # too small for large tool results (e.g. browser snapshots)
             )
         if resume:
             try:

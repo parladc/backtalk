@@ -39,6 +39,7 @@ HARD-WON AUDIO LAW #2 — buffer ~0.75s of synthesized audio before a
 sentence starts playing, so a slower machine never underruns into
 slow-motion garble.
 """
+import logging
 import os
 import queue
 import re
@@ -47,9 +48,16 @@ import sys
 import tempfile
 import threading
 
+# Quiets huggingface_hub's "sending unauthenticated requests" notice.
+# Harmless (Kokoro-82M is a public model, no token needed to use it) --
+# a real HF_TOKEN would only buy higher rate limits, which nothing here
+# needs, so this just stops the noise rather than chasing an account.
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+
 import numpy as np
 import sounddevice as sd
 
+from backtalk import signals
 from backtalk.config import CFG
 from backtalk.vlog import log
 
@@ -171,7 +179,7 @@ def warm():
             lang = (CFG["voice"] or "bm_lewis")[0]
             log(f"[mouth] loading kokoro (lang '{lang}', "
                 f"voice {CFG['voice']})...")
-            _pipe = KPipeline(lang_code=lang)
+            _pipe = KPipeline(lang_code=lang, repo_id="hexgrad/Kokoro-82M")
             log("[mouth] voice ready")
     return _pipe
 
@@ -354,6 +362,7 @@ class Mouth:
         """Queue text (split to sentences) for speech."""
         for s in split_sentences(text):
             self._q.put((s, None))
+            signals.append_transcript(CFG["name"], s)
 
     def say_chunk(self, text: str, directions=None):
         """Queue text as ONE TTS request, no sentence splitting — fuller
@@ -366,6 +375,7 @@ class Mouth:
         text = text.strip()
         if text:
             self._q.put((text, directions or None))
+            signals.append_transcript(CFG["name"], text)
 
     def shut_up(self):
         """Barge-in: stop current playback and flush everything queued."""

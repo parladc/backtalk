@@ -40,6 +40,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import numpy as np
@@ -63,6 +64,17 @@ _THINKING_SOUND = CFG.get("thinking_sound") or ""
 _WAVEFORM_MIN_INTERVAL = 1.0 / 15   # ~15 writes/sec is plenty for 60fps reads
 _last_waveform_write = 0.0
 _static_proc: subprocess.Popen | None = None
+
+# In-memory transcript: every line either side of the conversation
+# "said" — the dashboard's text terminal polls this. In-process only
+# (no file, unlike the rest of this bus) since the one consumer lives in
+# the same interpreter; a growing JSON file on disk would just be I/O
+# nobody outside this process reads. Capped so an all-day session can't
+# grow it without bound.
+_TRANSCRIPT_MAX = 500
+_transcript: list[dict] = []
+_transcript_next_id = 0
+_transcript_lock = threading.Lock()
 
 
 def set_state(name: str):
@@ -217,3 +229,28 @@ def static_stop():
         os.remove(_LOADING_PID_FILE)
     except OSError:
         pass
+
+
+def append_transcript(who: str, text: str):
+    """Add one line to the conversation transcript. `who` is "you" for
+    the human side (mic, PC-typed, or phone-typed — handle() in main.py
+    calls this once for all three) or the agent's name for the other
+    (mouth.py calls this from say()/say_chunk(), the one chokepoint
+    everything spoken passes through, so replies, permission asks, and
+    console confirmations all show up). Never raises."""
+    text = (text or "").strip()
+    if not text:
+        return
+    global _transcript_next_id
+    with _transcript_lock:
+        _transcript_next_id += 1
+        _transcript.append({"id": _transcript_next_id, "who": who,
+                            "text": text, "ts": time.time()})
+        if len(_transcript) > _TRANSCRIPT_MAX:
+            del _transcript[: len(_transcript) - _TRANSCRIPT_MAX]
+
+
+def get_transcript(since: int = 0) -> list[dict]:
+    """Every line with id > since, oldest first. Never raises."""
+    with _transcript_lock:
+        return [m for m in _transcript if m["id"] > since]

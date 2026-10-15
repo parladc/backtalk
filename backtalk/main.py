@@ -61,7 +61,7 @@ import sys
 import threading
 import time
 
-from backtalk import signals
+from backtalk import dashboard, signals
 from backtalk.brain import WarmBrain
 from backtalk.config import CFG
 from backtalk.ears import (Ears, explain_audio_failure, record_held,
@@ -581,8 +581,9 @@ def _typed_reader(q: "queue.Queue[str]"):
 
 async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
     """First sentence ships alone (fast start); the rest go in
-    2-sentence breaths — fuller chunks get livelier prosody (single
-    short sentences come out flat)."""
+    paragraph-sized breaths — fuller chunks get livelier prosody and
+    read as continuous speech instead of pausing after every sentence,
+    at the cost of a longer wait before each chunk starts playing."""
     t0 = time.time()
     first = True
     batch: list[str] = []
@@ -614,7 +615,7 @@ async def speak_reply(brain: WarmBrain, mouth: Mouth, text: str):
         else:
             log(f"[{NAME}] {s}" + (f"  <directions: {pending}>" if pending else ""))
             batch.append(s)
-            if len(batch) >= 2:
+            if len(batch) >= 5:
                 mouth.say_chunk(" ".join(batch), pending)
                 pending = []
                 batch = []
@@ -862,6 +863,7 @@ async def amain():
         told apart from speech that began before the ask even existed."""
         nonlocal speak_task
         log(f"[you]    {text}")
+        signals.append_transcript("you", text)
         # A pending spoken permission ask owns the next utterance IF
         # that utterance started after the ask was posed. Speech that
         # began earlier is the user interrupting the turn, not
@@ -945,6 +947,9 @@ async def amain():
         # callable closes the in-flight open mic promptly, and any
         # capture born under an old gen is discarded unprocessed.
         ptt = PTTListener(CFG["ptt_key"])
+        dash_port = int(CFG.get("dashboard_port") or 0)
+        if dash_port:
+            dashboard.start(dash_port, typed_q)
         press_fut: asyncio.Future | None = None
         mic_fut: asyncio.Future | None = None
         mic_gen_seen = _MIC["gen"]

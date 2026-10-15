@@ -89,6 +89,14 @@ DEFAULTS = {
     # Hold-to-talk key. Named keys ("home", "f13", "right_alt", ...)
     # or a single character.
     "ptt_key": "home",
+    # A text terminal on a local web page, served on every network
+    # interface (reachable from a phone on the same Wi-Fi, not just
+    # this machine) so the agent is reachable without being near the
+    # mic/speakers at all — type, read the reply, same conversation as
+    # the voice line. No separate on/off switch, no login — anything
+    # that can reach the port can talk to your agent. Logged at
+    # startup as a URL. Set to 0 to disable.
+    "dashboard_port": 8792,
     # The microphone mode. "ptt" (push to talk, the default and the
     # recommendation): the mic is closed except while the key is held,
     # so room audio and your own speakers can never trigger the agent.
